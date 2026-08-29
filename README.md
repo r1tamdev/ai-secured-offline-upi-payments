@@ -546,7 +546,7 @@ Originally developed for NASA deep-space communication where signals take minute
 
 ## 👨‍💻 Author
 
-**Ritam** — [@r1tamdev](https://github.com/r1tamdev)
+**Ritam Chowdhury** — [@r1tamdev](https://github.com/r1tamdev)
 
 ## 📄 License
 
