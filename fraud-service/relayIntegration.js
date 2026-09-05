@@ -1,3 +1,8 @@
+// relayIntegration.js
+// Drop this into your existing MERN relay service (e.g. services/fraudCheck.js)
+// and call `checkFraud()` right before you commit a decrypted packet
+// for settlement.
+
 import axios from "axios";
 
 const FRAUD_SERVICE_URL = process.env.FRAUD_SERVICE_URL || "http://localhost:8001";
@@ -25,3 +30,31 @@ export async function checkFraud(txn) {
     return { isAnomalous: false, anomalyScore: null, topContributingFeatures: [] };
   }
 }
+
+// --- Example usage inside your existing settlement route/controller ---
+//
+// import { checkFraud } from "./services/fraudCheck.js";
+//
+// router.post("/relay/settle", async (req, res) => {
+//   const packet = decryptPacket(req.body.encryptedPacket); // your existing crypto step
+//
+//   const fraudResult = await checkFraud({
+//     senderId: packet.senderId,
+//     receiverId: packet.receiverId,
+//     amount: packet.amount,
+//     timestamp: packet.timestamp,
+//     relayDelaySeconds: (Date.now() - new Date(packet.createdAt)) / 1000,
+//     packetSizeBytes: Buffer.byteLength(req.body.encryptedPacket),
+//   });
+//
+//   if (fraudResult.isAnomalous) {
+//     await PendingReview.create({ ...packet, fraudResult });
+//     return res.status(202).json({
+//       status: "pending_review",
+//       reason: fraudResult.topContributingFeatures,
+//     });
+//   }
+//
+//   await settleTransaction(packet); // your existing settlement logic
+//   return res.status(200).json({ status: "settled" });
+// });

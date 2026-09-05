@@ -1,7 +1,6 @@
 import mongoose from "mongoose";
 import User from "../models/user.js";
 import Payment from "../models/payment.js";
-import { checkFraud } from "./FraudCheck.js";
 
 export async function settle(instruction, packetHash, relayedBy = "anonymous") {
   const { nonce, sender, receiver, amount, note, signedAt } = instruction;
@@ -26,42 +25,6 @@ export async function settle(instruction, packetHash, relayedBy = "anonymous") {
 
     const receiverDoc = await User.findOne({ upiId: receiver }, null, opts);
     if (!receiverDoc) throw new Error(`Receiver not found: ${receiver}`);
-
-    const relayDelaySeconds = (Date.now() - new Date(signedAt).getTime()) / 1000;
- 
-    const fraudResult = await checkFraud({
-      senderId: sender,
-      receiverId: receiver,
-      amount,
-      timestamp: new Date(signedAt).toISOString(),
-      relayDelaySeconds,
-      packetSizeBytes: Buffer.byteLength(JSON.stringify(instruction)),
-    });
- 
-    if (fraudResult.isAnomalous) {
-      // Log the payment as pending review WITHOUT mutating balances.
-      const [pendingPayment] = await Payment.create(
-        [
-          {
-            packetHash,
-            nonce,
-            sender,
-            receiver,
-            amount,
-            note,
-            signedAt,
-            status: "PENDING_REVIEW",
-            relayedBy,
-            fraudScore: fraudResult.anomalyScore,
-            fraudReasons: fraudResult.topContributingFeatures,
-          },
-        ],
-        opts,
-      );
- 
-      if (useSession) await session.commitTransaction();
-      return pendingPayment;
-    }
 
     senderDoc.balance   = +(senderDoc.balance   - amount).toFixed(2);
     receiverDoc.balance = +(receiverDoc.balance  + amount).toFixed(2);
