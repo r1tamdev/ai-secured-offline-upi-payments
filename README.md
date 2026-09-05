@@ -4,6 +4,8 @@
   <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black" />
   <img src="https://img.shields.io/badge/MongoDB-Atlas-47A248?logo=mongodb&logoColor=white" />
   <img src="https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white" />
+  <img src="https://img.shields.io/badge/FastAPI-Fraud%20Detection-009688?logo=fastapi&logoColor=white" />
+  <img src="https://img.shields.io/badge/scikit--learn-IsolationForest-F7931E?logo=scikitlearn&logoColor=white" />
   <img src="https://img.shields.io/badge/License-MIT-blue" />
 </p>
 
@@ -14,7 +16,7 @@
 </p>
 
 <p align="center">
-  A mesh-routed offline payment system where encrypted payment packets are carried by strangers who <em>cannot read, modify, or steal</em> a single rupee.
+  A mesh-routed offline payment system where encrypted payment packets are carried by strangers who <em>cannot read, modify, or steal</em> a single rupee — now with an AI-powered fraud risk layer that flags suspicious transactions before they settle.
 </p>
 
 ---
@@ -27,7 +29,7 @@ You're in a village with zero network. You need to pay ₹500 to a shopkeeper. A
 Your phone                      Stranger's phone                 Bank server
 ──────────                      ────────────────                 ───────────
 Create payment ─── QR / BLE ──→ Scan the blob    ─── HTTPS ──→  Decrypt
-Encrypt with RSA                Can't read it                    Validate
+Encrypt with RSA                Can't read it                    Score for fraud
 Show QR code                    Can't change it                  Settle ✅
                                 Just carries it
 ```
@@ -41,6 +43,7 @@ The stranger is a **dumb pipe** — like a postman who carries a sealed envelope
 - [Why This Exists](#-why-this-exists)
 - [Architecture](#-architecture)
 - [Cryptographic Design](#-cryptographic-design)
+- [AI Fraud Detection Layer](#-ai-fraud-detection-layer)
 - [API Reference](#-api-reference)
 - [Database Schema](#-database-schema)
 - [Client Pages & Routing](#-client-pages--routing)
@@ -68,7 +71,7 @@ India's UPI handles **14+ billion transactions per month**. Every single one req
 | Migrant worker, data expired | ₹0 balance on prepaid SIM |
 | International tourist | No local SIM, no UPI access |
 
-**UPI Offline Mesh decouples the payer from the internet** by introducing a relay layer between the payer and the bank. The relay carries encrypted data it cannot understand.
+**UPI Offline Mesh decouples the payer from the internet** by introducing a relay layer between the payer and the bank. The relay carries encrypted data it cannot understand. Because settlement happens after a delay, an **AI-based risk layer** also screens each transaction before funds move.
 
 ---
 
@@ -110,6 +113,13 @@ India's UPI handles **14+ billion transactions per month**. Every single one req
 │  ┌────────────────────────────────────────────────────┘         │
 │  │                                                              │
 │  ▼  ┌─────────────────────────────────────────────────────┐     │
+│     │  AI FRAUD SCORING (Python FastAPI, port 8001)       │     │
+│     │  IsolationForest.decision_function(features)        │     │
+│     │  anomalous? → hold as PENDING_REVIEW                │     │
+│     │  normal?    → proceed to settlement                 │     │
+│     └──────────────────────┬──────────────────────────────┘     │
+│                            ▼                                    │
+│     ┌─────────────────────────────────────────────────────┐     │
 │     │  ATOMIC SETTLEMENT (MongoDB session)                │     │
 │     │  sender.balance   -= amount                         │     │
 │     │  receiver.balance += amount                         │     │
@@ -169,6 +179,95 @@ Offset      Size        Content
 | **Replay after 24 hours** | `signedAt` timestamp checked — rejected if age > 24h |
 | **Brute force UPI PIN** | bcryptjs with cost factor 10 — ~100ms per comparison |
 | **Steal the QR code photo** | Encrypted blob — photo is useless without server's private key |
+| **Compromised sender behaving abnormally** | AI fraud layer flags unusual amount/velocity/fan-out before settlement |
+
+---
+
+## 🧠 AI Fraud Detection Layer
+
+Because settlement is **deferred** in a DTN-inspired mesh — a packet can sit offline for hours before reaching a relay — verifying a transaction only *after* it's already decrypted isn't enough. A separate risk-scoring layer sits between decryption and settlement to catch statistically abnormal transactions before funds move.
+
+### Why Unsupervised Learning
+
+There's no labeled fraud dataset for a new payment system — no company has one on day one either. Instead of a classifier trained on fraud/not-fraud labels, this uses **Isolation Forest**, an unsupervised anomaly detection algorithm that learns what's "normal" for each sender and flags statistical outliers, without needing prior fraud examples.
+
+### Architecture
+
+```
+Node/Express (port 8080)              Python/FastAPI (port 8001)
+──────────────────────                ───────────────────────────
+Ingest.js decrypts packet
+        │
+        ▼
+settlement.js
+        │  POST /score { senderId, receiverId,
+        │                amount, timestamp,
+        │                relayDelaySeconds,
+        ├───────────────►packetSizeBytes }
+        │                        │
+        │                        ▼
+        │                Extract features:
+        │                • amount vs sender's avg
+        │                • velocity (txns/5min)
+        │                • distinct receivers/5min
+        │                • relay delay
+        │                        │
+        │                        ▼
+        │                IsolationForest.decision_function()
+        │                        │
+        │  ◄─────────────────────┘
+        │  { isAnomalous, anomalyScore,
+        │    topContributingFeatures }
+        ▼
+  isAnomalous?
+   ├── true  → Payment.create({ status: "PENDING_REVIEW", fraudScore, fraudReasons })
+   │           balances untouched
+   └── false → normal settlement (debit sender, credit receiver)
+```
+
+### Design Principles
+
+| Principle | Why |
+|---|---|
+| **Unsupervised (Isolation Forest)** | No labeled fraud data exists for a new system — same cold-start problem every real fraud engine (Stripe Radar, Visa Advanced Authorization) faces at launch |
+| **Fail-open** | If the fraud service is unreachable, settlement proceeds normally rather than blocking all payments — a scoring outage should never become a payments outage |
+| **Hold, don't block** | Flagged transactions go to `PENDING_REVIEW`, not automatic rejection — false positives blocking legitimate offline payments are worse than a delayed review |
+| **Feature-only, no PII beyond metadata** | Scoring uses transaction metadata already flowing through the relay (amount, timing, sender/receiver IDs) — no new data collection required |
+
+### Features Used for Scoring
+
+| Feature | Signal |
+|---|---|
+| `amount_ratio_to_avg` | How far this amount deviates from the sender's historical average |
+| `velocity_5min` | Number of transactions from this sender in the last 5 minutes |
+| `distinct_receivers_5min` | Fan-out pattern — many different receivers in a short window |
+| `relay_delay_seconds` | Time between packet signing and relay pickup — accounts for the mesh's natural offline delay so it isn't mistaken for suspicious timing |
+| `hour_of_day` | Time-of-day pattern relative to sender's usual activity |
+
+### Fraud Service API
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/score` | Scores a transaction: `{ senderId, receiverId, amount, timestamp, relayDelaySeconds, packetSizeBytes }` → `{ isAnomalous, anomalyScore, topContributingFeatures, features }` |
+| `GET` | `/health` | Health check — `{ status, modelLoaded }` |
+
+### Running the Fraud Service
+
+```bash
+cd fraud-service
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
+
+pip install -r requirements.txt
+copy .env.example .env       # then set MONGO_URI
+
+python seed_synthetic.py     # generates demo transaction data
+python train.py              # trains the Isolation Forest model
+uvicorn main:app --reload --port 8001
+```
+
+> **Note:** Both `server` (port 8080) and `fraud-service` (port 8001) must run simultaneously — the Node backend calls out to the Python service via `axios` before every settlement.
 
 ---
 
@@ -210,6 +309,7 @@ The `/payment/relay` endpoint returns one of these outcomes:
 | `TAMPERED` | 422 | Decryption failed — packet was modified |
 | `EXPIRED` | 422 | `signedAt` is more than 24 hours ago |
 | `FAILED` | 422 | Insufficient funds or user not found |
+| `PENDING_REVIEW` | 202 | AI fraud layer flagged the transaction as anomalous — held before settlement |
 
 ---
 
@@ -233,19 +333,21 @@ The `/payment/relay` endpoint returns one of these outcomes:
 
 ```javascript
 {
-  packetHash: String (unique), // SHA-256 of base64 packet (idempotency key)
-  nonce:      String,          // UUID from payment instruction
-  sender:     String,          // "ritam@okicici"
-  receiver:   String,          // "shopkeeper@oksbi"
-  amount:     Number,          // 500
-  note:       String,          // "Groceries"
-  signedAt:   Number,          // Unix timestamp from payer's device
-  status:     String,          // "SETTLED" | "FAILED" | "DUPLICATE"
-  failReason: String,          // null or error message
-  relayedBy:  String,          // "stranger@okupi" or "anonymous"
-  settledAt:  Date,
-  createdAt:  Date,
-  updatedAt:  Date
+  packetHash:   String (unique), // SHA-256 of base64 packet (idempotency key)
+  nonce:        String,          // UUID from payment instruction
+  sender:       String,          // "ritam@okicici"
+  receiver:     String,          // "shopkeeper@oksbi"
+  amount:       Number,          // 500
+  note:         String,          // "Groceries"
+  signedAt:     Number,          // Unix timestamp from payer's device
+  status:       String,          // "SETTLED" | "FAILED" | "DUPLICATE" | "PENDING_REVIEW"
+  failReason:   String,          // null or error message
+  relayedBy:    String,          // "stranger@okupi" or "anonymous"
+  fraudScore:   Number,          // Isolation Forest decision_function score
+  fraudReasons: [String],        // e.g. ["amount 12.3x sender's average"]
+  settledAt:    Date,
+  createdAt:    Date,
+  updatedAt:    Date
 }
 ```
 
@@ -306,7 +408,7 @@ Payer copies packet text ──any channel──→ Relay pastes into textarea
 
 ## ⚙️ Server-Side Ingest Pipeline
 
-Every uploaded packet passes through 5 sequential checks in `services/Ingest.js`:
+Every uploaded packet passes through these sequential checks (`services/Ingest.js` → `services/settlement.js`):
 
 ```
                     packet (base64 string)
@@ -335,7 +437,13 @@ Every uploaded packet passes through 5 sequential checks in `services/Ingest.js`
                 └──────────┬──────────┘
                            │
                 ┌──────────┴──────────┐
-           5.   │   ATOMIC SETTLEMENT   │     ← MongoDB session (if replica set)
+           5.   │   AI FRAUD SCORING    │     ← POST to fraud-service /score
+                │   IsolationForest     │        Fails open on service outage
+                │   anomalous → hold    │
+                └──────────┬──────────┘
+                           │
+                ┌──────────┴──────────┐
+           6.   │   ATOMIC SETTLEMENT   │     ← MongoDB session (if replica set)
                 │   sender.balance  -= N│        Falls back to non-session for
                 │   receiver.balance+= N│        standalone instances
                 │   Payment.create()    │
@@ -356,7 +464,7 @@ MERN-UPI-OFFLINE/
 │   │   └── ServerKeyHolder.js       # RSA-2048 keypair (lazy-generated, in-memory)
 │   ├── models/
 │   │   ├── user.js                  # Mongoose schema — bcrypt PIN, ₹5000 default
-│   │   └── payment.js               # Mongoose schema — packetHash unique index
+│   │   └── payment.js               # Mongoose schema — packetHash unique index, fraud fields
 │   ├── routes/
 │   │   ├── auth.js                  # POST /register, /login, GET /pubkey, /me
 │   │   ├── payment.js               # POST /relay, GET /status/:hash, /history
@@ -364,8 +472,17 @@ MERN-UPI-OFFLINE/
 │   │   └── requireAuth.js           # JWT verify middleware
 │   └── services/
 │       ├── Ingest.js                # 5-step pipeline: hash → dedup → decrypt → freshness → settle
-│       ├── Settlement.js            # Atomic debit + credit with MongoDB sessions
+│       ├── settlement.js            # Atomic debit + credit with MongoDB sessions + fraud check
+│       ├── fraudCheck.js            # Calls fraud-service /score via axios, fails open on error
 │       └── Idempotency.js           # In-memory Map with 24h TTL cleanup
+│
+├── fraud-service/                   # Python FastAPI — AI fraud detection microservice
+│   ├── main.py                      # /score endpoint, loads trained model
+│   ├── features.py                  # Feature engineering (amount ratio, velocity, fan-out)
+│   ├── train.py                     # Trains IsolationForest on MongoDB transaction history
+│   ├── seed_synthetic.py            # Generates synthetic transactions for demo/training
+│   ├── requirements.txt
+│   └── .env.example
 │
 ├── client/                          # React + Vite frontend
 │   └── src/
@@ -395,6 +512,7 @@ MERN-UPI-OFFLINE/
 ### Prerequisites
 
 - **Node.js 18+** and npm
+- **Python 3.9+** (for the fraud-detection microservice)
 - **MongoDB Atlas** free cluster (M0 tier) or local MongoDB
 - **Chrome** browser (for Web Bluetooth support)
 - Two devices on the same Wi-Fi network
@@ -412,6 +530,18 @@ Create `server/.env`:
 PORT=8080
 MONGO_URI=mongodb+srv://<user>:<pass>@cluster0.mongodb.net/upi_mesh?retryWrites=true&w=majority
 JWT_SECRET=replace_with_a_long_random_string
+FRAUD_SERVICE_URL=http://localhost:8001
+```
+
+Create `fraud-service/.env`:
+
+```env
+MONGO_URI=mongodb+srv://<user>:<pass>@cluster0.mongodb.net/upi_mesh?retryWrites=true&w=majority
+DB_NAME=upi_mesh
+MODEL_PATH=model.pkl
+TRAIN_LOOKBACK_DAYS=30
+CONTAMINATION=0.02
+FLAG_THRESHOLD=0.0
 ```
 
 ### 2. Install & run
@@ -426,6 +556,15 @@ npm run dev          # nodemon on port 8080
 cd client
 npm install
 npm run dev -- --host   # Vite on port 5173, exposed to LAN
+
+# Terminal 3 — Fraud Detection Service
+cd fraud-service
+python -m venv venv
+venv\Scripts\activate      # Windows
+pip install -r requirements.txt
+python seed_synthetic.py   # first-time only
+python train.py            # first-time only
+uvicorn main:app --reload --port 8001
 ```
 
 ### 3. Access
@@ -464,6 +603,13 @@ Find your IP: `ipconfig` (Windows) or `hostname -I` (Linux/Mac).
 3. Tab 1: Create payment QR → copy the packet from the QR (right-click → inspect → copy base64)
 4. Tab 2: Relay → paste into manual input → upload
 
+### Testing the fraud layer
+
+1. Make several rapid payments (5-6 within a minute) from the same sender to different receivers
+2. Or send one payment far larger than the sender's usual amounts
+3. Check the `Payment` collection in MongoDB — the transaction should appear with `status: "PENDING_REVIEW"`, a populated `fraudScore`, and `fraudReasons` explaining what triggered the flag
+4. A normal, average-sized transaction should still settle immediately with `status: "SETTLED"`
+
 ---
 
 ## 🔬 Security Analysis
@@ -500,6 +646,22 @@ SHA-256 fingerprint is checked against an in-memory Map and MongoDB's unique ind
 
 The `signedAt` timestamp inside the encrypted payload is compared against the server's clock.
 
+### What happens if a sender's behavior looks abnormal
+
+```json
+{
+  "outcome": "PENDING_REVIEW",
+  "fraudScore": -0.14,
+  "fraudReasons": [
+    "amount 12.3x sender's average",
+    "5 transactions in last 5 min",
+    "fan-out to 5 receivers in 5 min"
+  ]
+}
+```
+
+The transaction is held before settlement — balances are untouched until reviewed.
+
 ---
 
 ## 🚧 Limitations & Roadmap
@@ -513,6 +675,9 @@ The `signedAt` timestamp inside the encrypted payload is compared against the se
 | No push notification to payer on settlement | WebSocket or Server-Sent Events |
 | HTTP on LAN (no camera/BLE) | `mkcert` for local HTTPS or deploy with TLS |
 | Each user starts with ₹5000 demo balance | Bank-linked KYC onboarding |
+| Fraud model uses synthetic training data | Retrain continuously on real settled/reviewed transactions as volume grows |
+| No feedback loop from reviewed transactions back into the model | Feed confirmed fraud/false-positive labels from `PENDING_REVIEW` back into periodic retraining |
+| No admin UI for the review queue | Build a `PENDING_REVIEW` dashboard for manual approve/reject |
 
 ---
 
@@ -535,12 +700,13 @@ This project implements concepts from **DTN — Delay Tolerant Networking**:
 
 > *Store → Carry → Forward*
 
-Originally developed for NASA deep-space communication where signals take minutes to travel. The same principle lets a payment instruction travel through an untrusted human relay when no direct network path exists.
+Originally developed for NASA deep-space communication where signals take minutes to travel. The same principle lets a payment instruction travel through an untrusted human relay when no direct network path exists. The fraud-detection layer draws on the same "cold-start" risk-management approach used by real fraud engines before they accumulate labeled fraud data.
 
 **Academic references:**
 - Fall, K. (2003). "A Delay-Tolerant Network Architecture for Challenged Internets" — ACM SIGCOMM
 - RBI Working Paper on Digital Financial Inclusion in Rural India (2023)
 - NPCI Offline Payment Framework — UPI Lite specification
+- Liu, F. T., Ting, K. M., & Zhou, Z.-H. (2008). "Isolation Forest" — IEEE ICDM
 
 ---
 
@@ -559,5 +725,5 @@ MIT License — free to use, modify, and distribute.
 </p>
 
 ```bash
-git clone https://github.com/r1tamdev/upi-offline-mesh.git
+git clone https://github.com/r1tamdev/ai-secured-offline-upi-payments
 ```
