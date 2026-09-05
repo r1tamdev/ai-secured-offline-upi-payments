@@ -21,6 +21,14 @@ export default function PayPage() {
   const [qrDataUrl, setQrDataUrl] = useState('')
   const [settlement, setSettlement] = useState(null)
   const [bleStatus, setBleStatus] = useState('')
+
+
+const [ receiverMode, setReceiverMode ] = useState('new')
+const [ receiverSearch, setReceiverSearch ] = useState('')
+const [ receiverValid, setReceiverValid ] = useState(null)
+const [ receiverName, setReceiverName ] = useState('')
+const [ validating, setValidating ] = useState(false)
+
   const pollRef  = useRef(null)
   const formRef  = useRef(form)   // keep latest form values inside interval
 
@@ -33,9 +41,7 @@ export default function PayPage() {
     api.get('/account/users').then((r) => setUsers(r.data)).catch(() => {})
   }, [])
 
-  // ── Poll payment history when QR is showing ──────────────────────────────
-  // Works across different devices because it hits the server directly —
-  // no sessionStorage sync needed between payer and relay phones.
+  // ── Poll payment history when QR is showing ───
   useEffect(() => {
     if (step !== 'qr') {
       clearInterval(pollRef.current)
@@ -75,10 +81,50 @@ export default function PayPage() {
     return () => clearInterval(pollRef.current)
   }, [step, user])
 
+
+  async function handleVerifyUpiId(){
+    setValidating(true)
+    setReceiverValid(null)
+    setReceiverName('')
+    setForm((f) => ({ ...f, receiver: '' }))
+    try{
+      const res = await api.get('/account/users')
+      const found = res.data.find(
+        (u) => u.upiId === receiverSearch.trim().toLowerCase()
+      )
+      if (found) {
+        if (found.upiId === user.upiId) {
+          setReceiverValid(false)
+          setReceiverName("Can't pay yourself")
+        } else {
+          setReceiverValid(true)
+          setReceiverName(found.name)
+          setForm((f) => ({ ...f, receiver: found.upiId }))
+        }
+      } else {
+        setReceiverValid(false)
+      }
+    }
+    catch{
+      setReceiverValid(false)
+    } finally{
+      setValidating(false)
+    }
+  }
+
+  function switchReceiverMode(mode) {
+    setReceiverMode(mode)
+    setForm((f) => ({ ...f, receiver: '' }))
+    setReceiverValid(null)
+    setReceiverName('')
+    setReceiverSearch('')
+  }
+
   // ── Create encrypted packet + QR ─────────────────────────────────────────
   async function handleCreatePacket(e) {
     e.preventDefault()
     setError('')
+    if(!form.receiver) return setError('Please select or verify a receiver first')
     if (form.receiver === user.upiId) return setError("Can't pay yourself")
     setLoading(true)
     try {
@@ -239,28 +285,126 @@ export default function PayPage() {
           <hr className="border-gray-100 mb-4" />
 
           <form onSubmit={handleCreatePacket} className="space-y-4">
+
+             {/* ── Receiver field ── */}
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1">Pay to</label>
-              <select
-                value={form.receiver}
-                onChange={set('receiver')}
-                required
-                className="w-full px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-green-500"
-              >
-                <option value="">Select receiver…</option>
-                {users.filter((u) => u.upiId !== user?.upiId).map((u) => (
-                  <option key={u.upiId} value={u.upiId}>
-                    {u.name} ({u.upiId})
-                  </option>
-                ))}
-              </select>
+
+              {/* Mode toggle */}
+              <div className="flex bg-gray-100 rounded-xl p-1 mb-3">
+                <button
+                  type="button"
+                  onClick={() => switchReceiverMode('new')}
+                  className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${
+                    receiverMode === 'new'
+                      ? 'bg-white shadow text-gray-900'
+                      : 'text-gray-500'
+                  }`}
+                >
+                  Enter UPI ID
+                </button>
+                <button
+                   type="button"
+                  onClick={() => switchReceiverMode('select')}
+                  className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${
+                    receiverMode === 'select'
+                      ? 'bg-white shadow text-gray-900'
+                      : 'text-gray-500'
+                  }`}
+                >
+                  Recent contacts
+                </button>
+                </div>
+
+    
+     {/* Enter new UPI ID */}
+              {receiverMode === 'new' && (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <input
+                      placeholder="yourname@upi"
+                      value={receiverSearch}
+                      onChange={(e) => {
+                        setReceiverSearch(e.target.value)
+                        setReceiverValid(null)
+                        setReceiverName('')
+                        setForm((f) => ({ ...f, receiver: '' }))
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          if (receiverSearch.trim()) handleVerifyUpiId()
+                        }
+                      }}
+                      className="flex-1 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-green-500"
+                    />
+                <button
+                      type="button"
+                      disabled={!receiverSearch.trim() || validating}
+                      onClick={handleVerifyUpiId}
+                      className="px-4 py-3 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-sm font-semibold rounded-xl transition-colors"
+                    >
+                      {validating ? '…' : 'Verify'}
+                    </button>
+                  </div>
+
+                  {/* Verified successfully */}
+                  {receiverValid === true && (
+                    <div className="flex items-center gap-3 bg-green-50 border border-green-100 px-4 py-3 rounded-xl">
+                      <span className="text-lg">✅</span>
+                      <div>
+                        <div className="text-sm font-semibold text-green-800">{receiverName}</div>
+                        <div className="text-xs text-green-600">{receiverSearch.trim().toLowerCase()}</div>
+                      </div>
+                    </div>
+                  )}
+            
+            {/* Not found */}
+                  {receiverValid === false && (
+                    <div className="bg-red-50 border border-red-100 text-red-700 text-sm px-4 py-3 rounded-xl">
+                      ❌ {receiverName === "Can't pay yourself"
+                        ? "You can't pay yourself"
+                        : 'UPI ID not found. Check and try again.'}
+                    </div>
+                  )}
+                </div>
+              )}
+
+        {/* Select from registered users */}
+              {receiverMode === 'select' && (
+                <div>
+                  {users.filter((u) => u.upiId !== user?.upiId).length === 0 ? (
+                    <div className="text-sm text-gray-400 text-center py-4 bg-gray-50 rounded-xl">
+                      No recent contacts yet.
+                      <br />Switch to "Enter UPI ID" to pay someone new.
+                    </div>
+                  ) : (
+                    <select
+                      value={form.receiver}
+                      onChange={set('receiver')}
+                      required
+                      className="w-full px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-green-500"
+                    >
+                      <option value="">Select receiver…</option>
+                      {users
+                        .filter((u) => u.upiId !== user?.upiId)
+                        .map((u) => (
+                          <option key={u.upiId} value={u.upiId}>
+                            {u.name} ({u.upiId})
+                          </option>
+                          ))}
+                    </select>
+                  )}
+                </div>
+              )}
             </div>
 
+            {/* ── Amount ── */}
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1">Amount (₹)</label>
               <input
                 type="number"
-                placeholder=""
+                placeholder="500"
                 value={form.amount}
                 onChange={set('amount')}
                 min="1"
@@ -271,10 +415,11 @@ export default function PayPage() {
               />
             </div>
 
+             {/* ── Note ── */}
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1">Note (optional)</label>
               <input
-                placeholder=""
+                placeholder="Lunch split"
                 value={form.note}
                 onChange={set('note')}
                 className="w-full px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-green-500"
@@ -289,9 +434,9 @@ export default function PayPage() {
               💡 Your payment will be encrypted and turned into a QR. A stranger with internet will relay it.
             </div>
 
-            <button
+             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || !form.receiver}
               className="w-full bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white font-semibold py-3 rounded-xl transition-colors"
             >
               {loading ? 'Encrypting…' : '🔐 Create Payment QR'}
